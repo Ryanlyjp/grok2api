@@ -72,6 +72,22 @@ func TestInferenceTrafficIsRejectedWhileReconciling(t *testing.T) {
 	}
 }
 
+func TestCrossOriginPreflightBypassesClientAuthentication(t *testing.T) {
+	router := New(testDependencies())
+	request := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	request.Header.Set("Origin", "https://canvas.example.com")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	request.Header.Set("Access-Control-Request-Headers", "authorization")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if origin := recorder.Header().Get("Access-Control-Allow-Origin"); origin != "https://canvas.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", origin)
+	}
+}
+
 func TestSystemEndpointsRequireAdminAuthentication(t *testing.T) {
 	deps := testDependencies()
 	deps.PublicAPIBaseURL = "https://api.example.com"

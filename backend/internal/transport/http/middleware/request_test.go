@@ -264,3 +264,49 @@ func TestSecurityHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestCORSAllowsCrossOriginPreflight(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(CORS())
+	router.GET("/v1/models", func(c *gin.Context) { c.Status(http.StatusOK) })
+	request := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
+	request.Header.Set("Origin", "https://canvas.example.com")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	request.Header.Set("Access-Control-Request-Headers", "authorization, content-type")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", response.Code)
+	}
+	for name, expected := range map[string]string{
+		"Access-Control-Allow-Origin":      "https://canvas.example.com",
+		"Access-Control-Allow-Credentials": "true",
+		"Access-Control-Allow-Headers":     "authorization, content-type",
+		"Access-Control-Max-Age":           "600",
+	} {
+		if value := response.Header().Get(name); value != expected {
+			t.Fatalf("%s = %q", name, value)
+		}
+	}
+	if methods := response.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, http.MethodGet) || !strings.Contains(methods, http.MethodPost) || !strings.Contains(methods, http.MethodDelete) {
+		t.Fatalf("Access-Control-Allow-Methods = %q", methods)
+	}
+}
+
+func TestCORSLeavesActualRequestForHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(CORS())
+	router.GET("/v1/models", func(c *gin.Context) { c.Status(http.StatusUnauthorized) })
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("Origin", "https://another.example.com")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if origin := response.Header().Get("Access-Control-Allow-Origin"); origin != "https://another.example.com" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", origin)
+	}
+}

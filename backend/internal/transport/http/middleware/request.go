@@ -100,6 +100,31 @@ func SecurityHeaders() gin.HandlerFunc {
 	}
 }
 
+// CORS 允许浏览器客户端跨域调用，并让实际请求继续经过原有鉴权链路。
+func CORS() gin.HandlerFunc {
+	const allowedMethods = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+	return func(c *gin.Context) {
+		origin := strings.TrimSpace(c.GetHeader("Origin"))
+		if origin == "" {
+			c.Next()
+			return
+		}
+		c.Header("Access-Control-Allow-Origin", origin)
+		c.Header("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Add("Vary", "Origin")
+		if c.Request.Method == http.MethodOptions && strings.TrimSpace(c.GetHeader("Access-Control-Request-Method")) != "" {
+			c.Header("Access-Control-Allow-Methods", allowedMethods)
+			if requestedHeaders := strings.TrimSpace(c.GetHeader("Access-Control-Request-Headers")); requestedHeaders != "" {
+				c.Header("Access-Control-Allow-Headers", requestedHeaders)
+			}
+			c.Header("Access-Control-Max-Age", "600")
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
 // AccessLog 只记录路径、状态和耗时，不读取请求或响应正文。
 func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
