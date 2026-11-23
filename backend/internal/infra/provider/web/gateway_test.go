@@ -47,26 +47,46 @@ func TestGatewaySessionSupportsNewAndExistingConversations(t *testing.T) {
 	}
 }
 
-func TestGatewayTurnEventsOmitCastleAndPreserveAttachments(t *testing.T) {
+func TestGatewayTurnEventMatchesCurrentBrowserProtocol(t *testing.T) {
 	previous := &inferencedomain.WebResponseState{UpstreamParentResponseID: "response-1"}
-	item, response := gatewayTurnEvents("conversation-1", "hello", []string{"file-1"}, previous)
-	itemEvent := item["event"].(map[string]any)
-	if item["session_id"] != "conversation-1" || itemEvent["parent_response_id"] != "response-1" {
-		t.Fatalf("item event = %#v", item)
+	response := gatewayTurnEvent("conversation-1", "hello", []string{"file-1"}, previous)
+	responseEvent := response["event"].(map[string]any)
+	if response["session_id"] != "conversation-1" || responseEvent["type"] != "response.create" || responseEvent["parent_response_id"] != "response-1" {
+		t.Fatalf("response event = %#v", response)
 	}
-	encoded, err := json.Marshal(item)
+	encoded, err := json.Marshal(response)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(encoded)
 	for _, expected := range []string{`"file_attachment_ids":["file-1"]`, `"file_mention":{"file_id":"file-1"}`, `"text":{"text":"hello"}`} {
 		if !strings.Contains(text, expected) {
-			t.Fatalf("item JSON %s missing %s", text, expected)
+			t.Fatalf("response JSON %s missing %s", text, expected)
 		}
 	}
-	responseJSON, _ := json.Marshal(response)
-	if strings.Contains(string(responseJSON), "castle_request_token") {
-		t.Fatalf("response.create unexpectedly contains Castle token: %s", responseJSON)
+	if strings.Contains(text, `"target"`) || strings.Contains(text, "conversation.item.create") || strings.Contains(text, "castle_request_token") {
+		t.Fatalf("response.create contains obsolete fields: %s", text)
+	}
+}
+
+func TestParseGatewayImageChunks(t *testing.T) {
+	parsed := &parsedChat{}
+	frames := []string{
+		`{"event":{"type":"response.chunk","chunk":{"render_generated_image":{"id":"image-1","image_chunk":{"progress":100,"imageUrl":"users/test/generated/image.jpg","moderated":false}}}}}`,
+		`{"event":{"type":"response.chunk","chunk":{"renderEditedImage":{"id":"image-2","imageChunk":{"progress":100,"image_url":"users/test/generated/edited.jpg","moderated":false}}}}}`,
+	}
+	want := []string{
+		"https://assets.grok.com/users/test/generated/image.jpg",
+		"https://assets.grok.com/users/test/generated/edited.jpg",
+	}
+	for index, frame := range frames {
+		kind, delta, err := parseUpstreamFrame([]byte(frame), parsed)
+		if err != nil || kind != "image" || delta != want[index] {
+			t.Fatalf("frame %d kind=%q delta=%q err=%v", index, kind, delta, err)
+		}
+	}
+	if len(parsed.Images) != 2 {
+		t.Fatalf("images = %#v", parsed.Images)
 	}
 }
 
@@ -459,17 +479,22 @@ func TestResponsesStreamUsesOneStableOutputSequence(t *testing.T) {
 	if err := stream.Delta("text", "hello"); err != nil {
 		t.Fatal(err)
 	}
+	image := map[string]any{"url": "https://example.com/image.png", "mime_type": "image/png", "revised_prompt": "red circle"}
+	if err := stream.Image(image); err != nil {
+		t.Fatal(err)
+	}
 	call := parsedToolCall{ID: "call_1", Name: "lookup", Arguments: `{}`}
 	if err := stream.ToolCalls([]parsedToolCall{call}); err != nil {
 		t.Fatal(err)
 	}
 	parsed := parsedChat{ToolCalls: []parsedToolCall{call}}
+	recordChatImageOutput(&parsed, image)
 	parsed.Reasoning.WriteString("thinking")
 	parsed.Text.WriteString("hello")
 	if err := stream.Finish(&parsed); err != nil {
 		t.Fatal(err)
 	}
-	wantTypes := []string{"reasoning", "web_search_call", "message", "function_call"}
+	wantTypes := []string{"reasoning", "web_search_call", "message", "image_generation_call", "function_call"}
 	if len(parsed.ResponseOutput) != len(wantTypes) {
 		t.Fatalf("output = %#v", parsed.ResponseOutput)
 	}
@@ -526,6 +551,31 @@ func TestResponsesStreamUsesOneStableOutputSequence(t *testing.T) {
 		if addedIDs[index] == "" || doneIDs[index] != addedIDs[index] {
 			t.Fatalf("item[%d] lifecycle added=%q done=%q\n%s", index, addedIDs[index], doneIDs[index], out)
 		}
+	}
+	imageOutput := parsed.ResponseOutput[3].(map[string]any)
+	imageResult := imageOutput["result"].(map[string]any)
+	if imageResult["url"] != image["url"] || imageResult["mime_type"] != "image/png" {
+		t.Fatalf("image output = %#v", imageOutput)
+	}
+	if !strings.Contains(out, "response.image_generation_call.completed") {
+		t.Fatalf("image completion event missing: %s", out)
+	}
+}
+
+func TestBuildResponsesIncludesStructuredImageOutput(t *testing.T) {
+	parsed := parsedChat{}
+	recordChatImageOutput(&parsed, map[string]any{
+		"url": "https://example.com/image.png", "mime_type": "image/png", "revised_prompt": "red circle",
+	})
+	payload := buildOpenAIResult(conversation.OperationResponses, "resp_1", "grok-chat-fast", parsed, false)
+	outputs := payload["output"].([]any)
+	if len(outputs) != 2 {
+		t.Fatalf("output = %#v", outputs)
+	}
+	image := outputs[1].(map[string]any)
+	result := image["result"].(map[string]any)
+	if image["type"] != "image_generation_call" || image["status"] != "completed" || result["type"] != "image" || result["url"] != "https://example.com/image.png" || result["mime_type"] != "image/png" {
+		t.Fatalf("image output = %#v", image)
 	}
 }
 

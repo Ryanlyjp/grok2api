@@ -255,6 +255,39 @@ func (s *webResponsesStream) HostedSearch(call hostedSearchCall) error {
 	return s.completeOutput(index, completed)
 }
 
+func (s *webResponsesStream) Image(image map[string]any) error {
+	if s == nil || len(image) == 0 {
+		return nil
+	}
+	if err := s.closeReasoning(); err != nil {
+		return err
+	}
+	if err := s.closeMessage(nil); err != nil {
+		return err
+	}
+	index := s.allocateOutputIndex()
+	id := newWebID("img")
+	added := map[string]any{"id": id, "type": "image_generation_call", "status": "in_progress"}
+	if err := writeSSE(s.writer, "response.output_item.added", map[string]any{
+		"type": "response.output_item.added", "response_id": s.responseID, "output_index": index, "item": added,
+	}); err != nil {
+		return err
+	}
+	completed := imageGenerationOutputItem(id, image)
+	if err := writeSSE(s.writer, "response.image_generation_call.completed", map[string]any{
+		"type": "response.image_generation_call.completed", "response_id": s.responseID,
+		"item_id": id, "output_index": index, "item": completed,
+	}); err != nil {
+		return err
+	}
+	if err := writeSSE(s.writer, "response.output_item.done", map[string]any{
+		"type": "response.output_item.done", "response_id": s.responseID, "output_index": index, "item": completed,
+	}); err != nil {
+		return err
+	}
+	return s.completeOutput(index, completed)
+}
+
 func (s *webResponsesStream) ToolCalls(calls []parsedToolCall) error {
 	if err := s.closeReasoning(); err != nil {
 		return err
@@ -316,7 +349,7 @@ func (s *webResponsesStream) Finish(parsed *parsedChat) error {
 			return err
 		}
 	}
-	if s.messageCount == 0 && len(parsed.ToolCalls) == 0 {
+	if s.messageCount == 0 && len(parsed.ToolCalls) == 0 && len(parsed.ImageOutputs) == 0 {
 		if err := s.ensureMessage(); err != nil {
 			return err
 		}

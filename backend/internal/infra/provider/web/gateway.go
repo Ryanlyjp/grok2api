@@ -297,11 +297,7 @@ func runGatewayStream(ctx context.Context, connection *websocket.Conn, writer io
 		}
 		if created && attached && !turnSent {
 			turnSent = true
-			item, response := gatewayTurnEvents(currentSessionID, prompt, attachments, previous)
-			if err := sender.write(item); err != nil {
-				return fmt.Errorf("发送 Grok Gateway conversation.item.create: %w", err)
-			}
-			if err := sender.write(response); err != nil {
+			if err := sender.write(gatewayTurnEvent(currentSessionID, prompt, attachments, previous)); err != nil {
 				return fmt.Errorf("发送 Grok Gateway response.create: %w", err)
 			}
 		}
@@ -343,37 +339,30 @@ func gatewaySession(model string, previous *inferencedomain.WebResponseState) ma
 	return map[string]any{"model": model, "x_grok": xGrok}
 }
 
-func gatewayTurnEvents(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) (map[string]any, map[string]any) {
+func gatewayTurnEvent(sessionID, prompt string, attachments []string, previous *inferencedomain.WebResponseState) map[string]any {
 	chunks := make([]any, 0, len(attachments)+1)
 	for _, attachment := range attachments {
-		chunks = append(chunks, map[string]any{"mention": map[string]any{"target": map[string]any{"file_mention": map[string]any{"file_id": attachment}}}})
+		chunks = append(chunks, map[string]any{"mention": map[string]any{"file_mention": map[string]any{"file_id": attachment}}})
 	}
 	chunks = append(chunks, map[string]any{"text": map[string]any{"text": prompt}})
 	item := map[string]any{
 		"type": "message", "role": "user",
 		"x_grok": map[string]any{"client_message_id": newRequestUUID(), "input_chunks": chunks},
 	}
-	if len(attachments) > 0 {
-		item["file_attachment_ids"] = attachments
-	}
 	now := time.Now().UnixMilli()
-	itemEvent := map[string]any{
+	responseEvent := map[string]any{
 		"session_id": sessionID,
 		"event": map[string]any{
-			"type": "conversation.item.create", "event_id": fmt.Sprintf("evt_msg_%d", now), "item": item,
+			"type": "response.create", "event_id": fmt.Sprintf("evt_resp_%d", now), "item": item,
 		},
 	}
 	if previous != nil {
-		itemEvent["event"].(map[string]any)["parent_response_id"] = previous.UpstreamParentResponseID
+		responseEvent["event"].(map[string]any)["parent_response_id"] = previous.UpstreamParentResponseID
 	}
 	if len(attachments) > 0 {
-		itemEvent["event"].(map[string]any)["file_attachment_ids"] = attachments
+		responseEvent["event"].(map[string]any)["file_attachment_ids"] = attachments
 	}
-	responseEvent := map[string]any{
-		"session_id": sessionID,
-		"event":      map[string]any{"type": "response.create", "event_id": fmt.Sprintf("evt_resp_%d", now)},
-	}
-	return itemEvent, responseEvent
+	return responseEvent
 }
 
 func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string, error) {
@@ -386,6 +375,15 @@ func parseGatewayEvent(event map[string]any, parsed *parsedChat) (string, string
 		chunk, _ := event["chunk"].(map[string]any)
 		if chunk == nil {
 			return "", "", nil
+		}
+		for _, key := range []string{"render_generated_image", "renderGeneratedImage", "render_edited_image", "renderEditedImage"} {
+			if card, _ := chunk[key].(map[string]any); card != nil {
+				if rawURL := imageURLFromCardData(card); rawURL != "" {
+					rawURL = absoluteAssetURL(rawURL)
+					parsed.Images = appendUniqueString(parsed.Images, rawURL)
+					return "image", rawURL, nil
+				}
+			}
 		}
 		// Current grok.com mgw protocol streams search tools and citations as
 		// dedicated chunk fields (not <grok:render> tokens).

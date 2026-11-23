@@ -132,6 +132,7 @@ type parsedChat struct {
 	upstreamText   strings.Builder
 	Reasoning      strings.Builder
 	Images         []string
+	ImageOutputs   []map[string]any
 	SearchSources  []map[string]any
 	Annotations    []map[string]any
 	// ResponseOutput is populated by the Responses streaming state machine so
@@ -353,7 +354,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 	parsed.ToolChoice = tools.ResponseChoice
 	parsed.ParallelTools = parallelTools
 	applyParsedToolCalls(&parsed, tools)
-	if err := a.archiveChatImages(ctx, request.Credential, &parsed); err != nil {
+	if err := a.archiveChatImages(ctx, request.Credential, &parsed, request.Operation); err != nil {
 		return nil, err
 	}
 	payload := buildOpenAIResult(request.Operation, responseID, input.Model, parsed, false, conversationOptions)
@@ -532,12 +533,16 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 				if imageErr != nil {
 					return imageErr
 				}
+				recordChatImageOutput(parsed, item)
+				archivedImages[rawURL] = struct{}{}
+				if responsesStream != nil {
+					return responsesStream.Image(item)
+				}
 				delta = liteImageMarkdown(item)
 				if parsed.Text.Len() > 0 {
 					delta = "\n\n" + delta
 				}
 				parsed.appendText(delta)
-				archivedImages[rawURL] = struct{}{}
 				kind = "text"
 			}
 			if kind == "text" && sieve != nil {
@@ -604,6 +609,14 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 				if imageErr != nil {
 					_ = writer.CloseWithError(imageErr)
 					return
+				}
+				recordChatImageOutput(parsed, item)
+				if responsesStream != nil {
+					if err := responsesStream.Image(item); err != nil {
+						_ = writer.CloseWithError(err)
+						return
+					}
+					continue
 				}
 				delta := liteImageMarkdown(item)
 				if clientText.Len() > 0 {
@@ -1354,11 +1367,15 @@ func applyParsedToolCalls(parsed *parsedChat, configuration toolConfiguration) {
 	parsed.ToolCalls = result.Calls
 }
 
-func (a *Adapter) archiveChatImages(ctx context.Context, credential account.Credential, parsed *parsedChat) error {
+func (a *Adapter) archiveChatImages(ctx context.Context, credential account.Credential, parsed *parsedChat, operation string) error {
 	for _, rawURL := range parsed.Images {
 		item, err := a.imageDataItem(ctx, credential, imagineImageValue{URL: rawURL}, "url")
 		if err != nil {
 			return err
+		}
+		recordChatImageOutput(parsed, item)
+		if operation == conversation.OperationResponses {
+			continue
 		}
 		if parsed.Text.Len() > 0 {
 			parsed.appendText("\n\n")
@@ -1366,6 +1383,46 @@ func (a *Adapter) archiveChatImages(ctx context.Context, credential account.Cred
 		parsed.appendText(liteImageMarkdown(item))
 	}
 	return nil
+}
+
+func recordChatImageOutput(parsed *parsedChat, item map[string]any) {
+	if parsed == nil || len(item) == 0 {
+		return
+	}
+	urlValue, _ := item["url"].(string)
+	b64Value, _ := item["b64_json"].(string)
+	for _, existing := range parsed.ImageOutputs {
+		if urlValue != "" && existing["url"] == urlValue {
+			return
+		}
+		if b64Value != "" && existing["b64_json"] == b64Value {
+			return
+		}
+	}
+	parsed.ImageOutputs = append(parsed.ImageOutputs, cloneAnyMap(item))
+}
+
+func imageGenerationOutputItem(id string, item map[string]any) map[string]any {
+	result := map[string]any{"type": "image"}
+	for _, key := range []string{"url", "b64_json", "mime_type", "revised_prompt"} {
+		if value, ok := item[key]; ok {
+			result[key] = value
+		}
+	}
+	return map[string]any{
+		"id": id, "type": "image_generation_call", "status": "completed", "result": result,
+	}
+}
+
+func imageGenerationOutputItems(items []map[string]any) []any {
+	if len(items) == 0 {
+		return nil
+	}
+	outputs := make([]any, 0, len(items))
+	for _, item := range items {
+		outputs = append(outputs, imageGenerationOutputItem(newWebID("img"), item))
+	}
+	return outputs
 }
 
 func appendUniqueString(values []string, value string) []string {
@@ -1880,6 +1937,7 @@ func buildOpenAIResult(operation, responseID, model string, parsed parsedChat, s
 			message := map[string]any{"id": newWebID("msg"), "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": parsed.Text.String(), "annotations": annotations, "logprobs": []any{}}}}
 			output = append(output, message)
 		}
+		output = append(output, imageGenerationOutputItems(parsed.ImageOutputs)...)
 		for _, call := range parsed.ToolCalls {
 			output = append(output, map[string]any{
 				"id": newWebID("fc"), "type": "function_call", "status": "completed",
