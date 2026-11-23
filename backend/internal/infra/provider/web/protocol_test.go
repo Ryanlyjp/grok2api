@@ -851,7 +851,7 @@ func TestImageEditRejectsUnsupportedCountAndStreamingOptions(t *testing.T) {
 	}
 }
 
-func TestBuildImageEditPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
+func TestBuildImageEditPayloadMatchesCurrentWebShape(t *testing.T) {
 	assets := []string{"metadata-1", "metadata-2"}
 	payload := buildImageEditPayload("改成兔子", assets, "1:1")
 	mediaGenInput, ok := payload["mediaGenInput"].(map[string]any)
@@ -862,14 +862,18 @@ func TestBuildImageEditPayloadMatchesCapturedMediaGenInputShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("imageToImage = %#v", mediaGenInput["imageToImage"])
 	}
-	if len(payload) != 6 || payload["modelName"] != "imagine-image-edit" || payload["message"] != "改成兔子" ||
-		payload["enableImageStreaming"] != true || payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true {
+	metadata, _ := payload["responseMetadata"].(map[string]any)
+	override, _ := metadata["modelConfigOverride"].(map[string]any)
+	modelMap, _ := override["modelMap"].(map[string]any)
+	if len(payload) != 8 || payload["modelName"] != "imagine-image-edit" || payload["message"] != "改成兔子" ||
+		payload["enableImageStreaming"] != true || payload["enableSideBySide"] != true || payload["sendFinalMetadata"] != true ||
+		modelMap["imageEditModel"] != "imagine" || payload["kind"] != "CONVERSATION_KIND_IMAGINE" {
 		t.Fatalf("payload = %#v", payload)
 	}
 	if imageToImage["prompt"] != "改成兔子" || imageToImage["aspectRatio"] != "1:1" || !slices.Equal(imageToImage["inputAssets"].([]string), assets) {
 		t.Fatalf("imageToImage = %#v", imageToImage)
 	}
-	for _, field := range []string{"temporary", "enableImageGeneration", "imageGenerationCount", "config", "responseMetadata", "kind", "parentPostId"} {
+	for _, field := range []string{"temporary", "enableImageGeneration", "imageGenerationCount", "config", "parentPostId"} {
 		if _, exists := payload[field]; exists {
 			t.Fatalf("legacy field %q leaked into payload: %#v", field, payload)
 		}

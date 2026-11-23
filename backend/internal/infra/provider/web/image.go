@@ -929,6 +929,10 @@ func buildImageEditPayload(prompt string, assets []string, aspectRatio string) m
 		"modelName": "imagine-image-edit", "message": prompt,
 		"enableImageStreaming": true, "enableSideBySide": true, "sendFinalMetadata": true,
 		"mediaGenInput": map[string]any{"imageToImage": imageToImage},
+		"responseMetadata": map[string]any{"modelConfigOverride": map[string]any{"modelMap": map[string]any{
+			"imageEditModel": "imagine",
+		}}},
+		"kind": "CONVERSATION_KIND_IMAGINE",
 	}
 }
 
